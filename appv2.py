@@ -3,6 +3,7 @@ import pandas as pd
 import os
 from datetime import datetime
 
+
 # --- CONFIGURATION & DATA ---
 DATA_CATEGORIES = {
     "Identification data and contact details": "name, home address, phone numbers, email, DOB, ID numbers ",
@@ -126,25 +127,49 @@ if st.session_state.purposes:
             }
 
 # --- STEP 4: GENERATE & DOWNLOAD ---
-if st.button("Generate CSV & Final Notice"):
-    # Save to CSV
+if st.button("Generate Excel & Final Notice"):
+    
+    # --- Sheet 1: Purposes / Responses ---
     rows = []
     for p in st.session_state.purposes:
         rows.append({
             "Company": company_name,
-            "Subject": subject_cat,
+            "Subject Category": subject_cat,
             "Purpose": p['title'],
             "Description": p['desc'],
-            "Data": ", ".join(p['details']['categories']),
+            "Data Categories": ", ".join(p['details']['categories']),
             "Sharing": p['details']['shared'],
             "Retention": p['details']['retention'],
             "Transfers": p['details']['transfers']
         })
-    df = pd.DataFrame(rows)
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download CSV Data", csv, "gdpr_data.csv", "text/csv")
 
-    # Display Notice in Browser
+    df_purposes = pd.DataFrame(rows)
+
+    # --- Sheet 2: Company Information ---
+    df_company = pd.DataFrame([{
+        "Company Name": company_name,
+        "Data Subjects": subject_cat,
+        "Company Activities": activities
+    }])
+
+    # --- Create Excel file in memory ---
+    from io import BytesIO
+    output = BytesIO()
+
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_purposes.to_excel(writer, index=False, sheet_name='Processing Details')
+        df_company.to_excel(writer, index=False, sheet_name='Company Info')
+
+    output.seek(0)
+
+    st.download_button(
+        label="Download Excel File",
+        data=output,
+        file_name="gdpr_data.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    # --- Display Notice in Browser (unchanged) ---
     st.markdown("---")
     st.header(f"Data Protection Notice: {company_name}")
     
@@ -159,12 +184,12 @@ if st.button("Generate CSV & Final Notice"):
             with st.status(f"Category: {cat}"):
                 st.write(f"**Specifics:** {DATA_CATEGORIES[cat]}")
                 st.write(f"**Purpose:** {p['title']}")
-                st.write(f"**How long we keep it:** {p['details']['retention']} [cite: 35]")
-                st.write(f"**Disclosed to:** {p['details']['shared']} [cite: 35]")
+                st.write(f"**How long we keep it:** {p['details']['retention']}")
+                st.write(f"**Disclosed to:** {p['details']['shared']}")
                 if p['details']['transfers'] != "No":
                     st.warning("Note: This data is transferred outside the EU/UK.")
 
-    st.subheader("What rights do you have over your data? ")
+    st.subheader("What rights do you have over your data?")
     st.markdown("""
     * **Right to Access**: Request a copy of your data.
     * **Right to Correct**: Update inaccurate information.
@@ -172,6 +197,7 @@ if st.button("Generate CSV & Final Notice"):
     * **Right to Object**: Restrict processing under certain conditions.
     * **Right to Data Portability**: Transfer your data to another organization.
     """)
+
     
     # Reset button after generating notice
     st.markdown("---")
