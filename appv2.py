@@ -18,8 +18,9 @@ DATA_CATEGORIES = {
     "Leisure activities": "hobbies, sports, interests ",
     "Memberships": "charitable, voluntary, or club memberships ",
     "Electronic localisation data": "GPS tracking, mobile phone location ",
-    "Sensitive beliefs": "racial/ethnic origin, religious or philosophical beliefs ",
-    "Sex life": "information relating to sex life, sexual orientation ",
+    "Personal beliefs": "religious or philosophical beliefs ",
+    "Ethnicity": "information on racial/ethnic origin",
+    "Sex life": "information relating to sexual activity or sexual orientation ",
     "Political/Union": "political affiliation, mandates, trade union membership ",
     "Judicial details": "criminal records, alleged offences ",
     "Education and training": "CV, degrees, interview notes, certifications ",
@@ -80,8 +81,28 @@ if st.session_state.purposes:
         with st.expander(f"Details for: {p['title']}"):
             # 1. Categories
             selected_cats = st.multiselect(f"Select data categories for {p['title']}", 
-                                           options=list(DATA_CATEGORIES.keys()), key=f"cat_{i}")
-            comment = st.text_input("Additional detail (optional)", key=f"com_{i}")
+                               options=list(DATA_CATEGORIES.keys()), key=f"cat_{i}")
+
+            # Multiple additional categories
+            if f"extra_cats_{i}" not in st.session_state:
+                st.session_state[f"extra_cats_{i}"] = []
+
+            with st.form(key=f"extra_cat_form_{i}"):
+                new_extra = st.text_input("Add additional data category (optional)", 
+                               placeholder="e.g., Preferred language, nickname")
+                if st.form_submit_button("➕ Add") and new_extra.strip():
+                    st.session_state[f"extra_cats_{i}"].append(new_extra.strip())
+
+            if st.session_state[f"extra_cats_{i}"]:
+                st.write("**Added custom categories:**")
+                for j, item in enumerate(st.session_state[f"extra_cats_{i}"]):
+                    col1, col2 = st.columns([5, 1])
+                    col1.write(f"- {item}")
+                    if col2.button("✕", key=f"del_extra_{i}_{j}"):
+                        st.session_state[f"extra_cats_{i}"].pop(j)
+                        st.rerun()
+
+            comment = ", ".join(st.session_state[f"extra_cats_{i}"])
             
             # 2. Third Parties
             sharing = st.radio("Is data shared with third parties?", ["No", "Yes"], key=f"share_{i}")
