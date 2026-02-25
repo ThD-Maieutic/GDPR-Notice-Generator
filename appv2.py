@@ -32,7 +32,7 @@ DATA_CATEGORIES = {
     "Audio recordings" : "tape recording, recorded phone calls or messages",
     "Electronic identification": "User ID, passwords, IP addresses " ,
     "Insurance and benefits": "Health and life insurance claims ",
-    "Dietary preferences": "As specified by the user ",
+    "Dietary preferences": "Dietary restrictions or preferences as specified by the user ",
     "social security number": "national social security number"
 }
 
@@ -104,23 +104,41 @@ if st.session_state.purposes:
                         st.rerun()
 
             comment = ", ".join(st.session_state[f"extra_cats_{i}"])
-            
-            # 2. Third Parties
+
+            # 2. Direct Collection
+            st.markdown("---")
+            direct_collection = st.radio(
+                "Is this information obtained directly from the data subject?",
+                ["Yes", "No"],
+                key=f"direct_{i}"
+            )
+            indirect_source = ""
+            if direct_collection == "No":
+                indirect_source = st.text_input(
+                    "How is this information obtained? Please specify the source(s).",
+                    placeholder="e.g., Third-party data brokers, publicly available sources, employer records, credit reference agencies",
+                    key=f"indirect_src_{i}"
+                )
+
+            # 3. Third Parties
+            st.markdown("---")
             sharing = st.radio("Is data shared with third parties?", ["No", "Yes"], key=f"share_{i}")
             third_party = ""
             if sharing == "Yes":
                 third_party = st.text_input("Who is it shared with?", placeholder="""e.g., Hosting providers, analytics services or any external parties that collect or process the data at your request """, key=f"who_{i}")
             
-            # 3. Retention
+            # 4. Retention
             retention = st.text_input("Retention Period", placeholder="e.g., For as long as the account is active ", key=f"ret_{i}")
             
-            # 4. Transfers
+            # 5. Transfers
             transfers = st.selectbox("International Transfers?", ["No", "Yes (Outside EU/UK)"], key=f"trans_{i}")
             
             # Save progress locally
             p['details'] = {
                 "categories": selected_cats,
                 "comment": comment,
+                "direct_collection": direct_collection,
+                "indirect_source": indirect_source if direct_collection == "No" else "",
                 "shared": third_party if sharing == "Yes" else "Internal use only",
                 "retention": retention,
                 "transfers": transfers
@@ -138,6 +156,8 @@ if st.button("Generate Excel & Final Notice"):
             "Purpose": p['title'],
             "Description": p['desc'],
             "Data Categories": ", ".join(p['details']['categories']),
+            "Obtained Directly from Data Subject": p['details']['direct_collection'],
+            "Source if Not Direct": p['details']['indirect_source'],
             "Sharing": p['details']['shared'],
             "Retention": p['details']['retention'],
             "Transfers": p['details']['transfers']
@@ -186,6 +206,11 @@ if st.button("Generate Excel & Final Notice"):
                 st.write(f"**Purpose:** {p['title']}")
                 st.write(f"**How long we keep it:** {p['details']['retention']}")
                 st.write(f"**Disclosed to:** {p['details']['shared']}")
+                if p['details']['direct_collection'] == "Yes":
+                    st.write("**Source:** Obtained directly from you.")
+                else:
+                    source_text = p['details']['indirect_source'] if p['details']['indirect_source'] else "Not specified"
+                    st.write(f"**Source:** Not obtained directly from you — {source_text}")
                 if p['details']['transfers'] != "No":
                     st.warning("Note: This data is transferred outside the EU/UK.")
 
