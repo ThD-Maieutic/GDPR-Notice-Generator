@@ -1,45 +1,212 @@
 import streamlit as st
 import pandas as pd
-import os
+import json
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime
+from io import BytesIO
 
+# --- CONFIGURATION ---
+# In Streamlit Secrets, define companies as:
+#
+# [companies]
+# "acme-code-1234" = "Acme Corp"
+# "globex-code-9981" = "Globex Industries"
+#
+# Each key is the access code, each value is the company display name.
 
-# --- CONFIGURATION & DATA ---
+SHEET_NAME = "GDPR Questionnaire Data"
+
 DATA_CATEGORIES = {
-    "Identification data and contact details": "name, home address, phone numbers, email, DOB, ID numbers ",
-    "Personal characteristics": "age, gender, marital status, languages, emergency contacts ",
-    "Immigration data": "visa, passport, work permits ",
-    "Composition of household": "name, address and DOB of dependents ",
-    "Genetic information": "inherited or genetic characteristics ",
-    "Physical data": "size, weight, hair/eye colour, distinctive features ",
-    "Biometric information": "facial images, fingerprints, behavioural characteristics ",
-    "Health-related data": "physical/mental health, medical certificates ",
-    "Aspects of lifestyle": "eating and drinking habits, behavioural data, wellness information that does not qualify as 'health data' ",
-    "Complaints/Incidents/Accidents": "information about accidents or complaints involved in ",
-    "Leisure activities": "hobbies, sports, interests ",
-    "Memberships": "charitable, voluntary, or club memberships ",
-    "Electronic localisation data": "GPS tracking, mobile phone location ",
-    "Personal beliefs": "religious or philosophical beliefs ",
+    "Identification data and contact details": "name, home address, phone numbers, email, DOB, ID numbers",
+    "Personal characteristics": "age, gender, marital status, languages, emergency contacts",
+    "Immigration data": "visa, passport, work permits",
+    "Composition of household": "name, address and DOB of dependents",
+    "Genetic information": "inherited or genetic characteristics",
+    "Physical data": "size, weight, hair/eye colour, distinctive features",
+    "Biometric information": "facial images, fingerprints, behavioural characteristics",
+    "Health-related data": "physical/mental health, medical certificates",
+    "Aspects of lifestyle": "eating and drinking habits, behavioural data, wellness information that does not qualify as 'health data'",
+    "Complaints/Incidents/Accidents": "information about accidents or complaints involved in",
+    "Leisure activities": "hobbies, sports, interests",
+    "Memberships": "charitable, voluntary, or club memberships",
+    "Electronic localisation data": "GPS tracking, mobile phone location",
+    "Personal beliefs": "religious or philosophical beliefs",
     "Ethnicity": "information on racial/ethnic origin",
-    "Sex life": "information relating to sexual activity or sexual orientation ",
-    "Political/Union": "political affiliation, mandates, trade union membership ",
-    "Judicial details": "criminal records, alleged offences ",
-    "Education and training": "CV, degrees, interview notes, certifications ",
-    "Profession and job": "salary, function, attendance, work history ",
-    "Financial details": "payroll, tax, bank accounts, expenses, pensions ",
-    "Performance information": "grades, disciplinary records, absence records ",
-    "Picture recordings": "camera recording, photographic recording, video recording, digital photographs, images of surveillance cameras ",
-    "Audio recordings" : "tape recording, recorded phone calls or messages",
-    "Electronic identification": "User ID, passwords, IP addresses " ,
-    "Insurance and benefits": "Health and life insurance claims ",
-    "Dietary preferences": "Dietary restrictions or preferences as specified by the user ",
-    "social security number": "national social security number"
+    "Sex life": "information relating to sexual activity or sexual orientation",
+    "Political/Union": "political affiliation, mandates, trade union membership",
+    "Judicial details": "criminal records, alleged offences",
+    "Education and training": "CV, degrees, interview notes, certifications",
+    "Profession and job": "salary, function, attendance, work history",
+    "Financial details": "payroll, tax, bank accounts, expenses, pensions",
+    "Performance information": "grades, disciplinary records, absence records",
+    "Picture recordings": "camera recording, photographic recording, video recording, digital photographs, images of surveillance cameras",
+    "Audio recordings": "tape recording, recorded phone calls or messages",
+    "Electronic identification": "User ID, passwords, IP addresses",
+    "Insurance and benefits": "Health and life insurance claims",
+    "Dietary preferences": "Dietary restrictions or preferences as specified by the user",
+    "Social security number": "national social security number"
 }
 
+
+# --- AUTHENTICATION HELPERS ---
+
+def get_companies():
+    """Return dict of {access_code: company_name} from Streamlit secrets."""
+    return dict(st.secrets.get("companies", {}))
+
+def validate_code(code):
+    """Return company name if code is valid, else None."""
+    return get_companies().get(code.strip())
+
+def make_tab_name(company_name):
+    """
+    Google Sheets tab names must be <= 100 chars and cannot contain: \ / ? * [ ]
+    Also strip leading/trailing apostrophes (Sheets restriction).
+    """
+    safe = company_name
+    for ch in ["\\", "/", "?", "*", "[", "]", ":"]:
+        safe = safe.replace(ch, "-")
+    safe = safe.strip("'")
+    return safe[:100]
+
+
+# --- GOOGLE SHEETS CONNECTION ---
+
+def get_gsheet_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scopes
+    )
+    return gspread.authorize(creds)
+
+def load_data_from_sheet(company_name):
+    """Load saved state for a specific company from its own worksheet tab."""
+    tab = make_tab_name(company_name)
+    try:
+        client = get_gsheet_client()
+        sheet = client.open(SHEET_NAME).worksheet(tab)
+        records = sheet.get_all_records()
+        if records:
+            raw = records[0].get("state", "{}")
+            return json.loads(raw)
+    except gspread.exceptions.WorksheetNotFound:
+        pass  # First time this company logs in — no tab yet
+    except Exception as e:
+        st.warning(f"Could not load saved data: {e}")
+    return {}
+
+def save_data_to_sheet(company_name, state_dict):
+    """Save state for a specific company to its own worksheet tab."""
+    tab = make_tab_name(company_name)
+    try:
+        client = get_gsheet_client()
+        spreadsheet = client.open(SHEET_NAME)
+
+        # Get or create the tab for this company
+        try:
+            sheet = spreadsheet.worksheet(tab)
+        except gspread.exceptions.WorksheetNotFound:
+            sheet = spreadsheet.add_worksheet(title=tab, rows=10, cols=3)
+            sheet.update("A1:B1", [["last_updated", "state"]])
+
+        state_json = json.dumps(state_dict, default=str)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        all_values = sheet.get_all_values()
+        if len(all_values) > 1:
+            sheet.update("A2:B2", [[now, state_json]])
+        else:
+            sheet.append_row([now, state_json])
+
+        return True
+    except Exception as e:
+        st.error(f"Could not save data: {e}")
+        return False
+
+
+# --- STATE HELPERS ---
+
+def extract_saveable_state():
+    saveable = {}
+    for key in ["company_name", "subject_cat", "activities", "purposes"]:
+        if key in st.session_state:
+            saveable[key] = st.session_state[key]
+    for i in range(len(st.session_state.get("purposes", []))):
+        k = f"extra_cats_{i}"
+        if k in st.session_state:
+            saveable[k] = st.session_state[k]
+    return saveable
+
+def restore_state(saved):
+    for key, value in saved.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+# --- PAGE CONFIG ---
 st.set_page_config(page_title="GDPR Notice Generator", layout="wide")
 
-# --- INTRODUCTION ---
-st.title("⚖️ GDPR Data Protection Notice Generator")
+
+# =============================================
+# ACCESS CODE GATE
+# =============================================
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "current_company" not in st.session_state:
+    st.session_state.current_company = None
+
+if not st.session_state.authenticated:
+    st.title("⚖️ GDPR Data Protection Notice Generator")
+    st.markdown("---")
+    st.subheader("🔒 Please enter your access code to continue")
+    col1, col2 = st.columns([2, 3])
+    with col1:
+        code_input = st.text_input("Access Code", type="password", placeholder="Enter your code...")
+        if st.button("Unlock", type="primary"):
+            company = validate_code(code_input)
+            if company:
+                st.session_state.authenticated = True
+                st.session_state.current_company = company
+                with st.spinner(f"Loading saved progress for {company}..."):
+                    saved = load_data_from_sheet(company)
+                    if saved:
+                        restore_state(saved)
+                        st.success(f"✅ Progress loaded for **{company}**!")
+                    else:
+                        st.info(f"No saved progress found for **{company}**. Starting fresh.")
+                st.rerun()
+            else:
+                st.error("Incorrect access code. Please try again.")
+    st.stop()
+
+
+# =============================================
+# MAIN APP
+# =============================================
+company = st.session_state.current_company
+
+if "purposes" not in st.session_state:
+    st.session_state.purposes = []
+
+# --- HEADER ---
+col_title, col_company, col_save = st.columns([3, 2, 1])
+with col_title:
+    st.title("⚖️ GDPR Data Protection Notice Generator")
+with col_company:
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.info(f"🏢 Logged in as: **{company}**")
+with col_save:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("💾 Save Progress", type="primary"):
+        with st.spinner("Saving..."):
+            if save_data_to_sheet(company, extract_saveable_state()):
+                st.success("Saved!")
+
 st.markdown("""
 This tool collects information to inform **Data Subjects** (the people whose data you use) about how their personal data is processed.
 **Guidance:**
@@ -52,44 +219,67 @@ This tool collects information to inform **Data Subjects** (the people whose dat
 
 # --- STEP 1: COMPANY INFO ---
 st.header("1. General Information")
-company_name = st.text_input("Company Name", placeholder="e.g., Acme Corp.")
-subject_cat = st.selectbox("Who are the Data Subjects?", 
-                          ["Employees", "Customers", "Website Users", "Event Participants", "Loyalty Card Holders", "Athletes", "Other"])
-activities = st.text_area("What relevant activities does your company perform?", 
-                         placeholder="e.g., Organizing music events and promoting artists.")
+
+company_name = st.text_input(
+    "Company Name",
+    value=st.session_state.get("company_name", company),
+    placeholder="e.g., Acme Corp.",
+    key="company_name"
+)
+subject_options = ["Employees", "Customers", "Website Users", "Event Participants", "Loyalty Card Holders", "Athletes", "Other"]
+subject_cat = st.selectbox(
+    "Who are the Data Subjects?",
+    subject_options,
+    index=subject_options.index(st.session_state.get("subject_cat", "Employees")),
+    key="subject_cat"
+)
+activities = st.text_area(
+    "What relevant activities does your company perform?",
+    value=st.session_state.get("activities", ""),
+    placeholder="e.g., Organizing music events and promoting artists.",
+    key="activities"
+)
 
 # --- STEP 2: PURPOSES ---
 st.header("2. Purposes of Processing")
-if 'purposes' not in st.session_state:
-    st.session_state.purposes = []
 
 with st.form("purpose_form"):
     p_title = st.text_input("Purpose Title", placeholder="e.g., Administration of the Platform")
     p_desc = st.text_area("Plain Language Description", placeholder="Creating user accounts, resetting passwords, etc.")
-    add_p = st.form_submit_button("Add Purpose")
-    if add_p and p_title:
-        st.session_state.purposes.append({"title": p_title, "desc": p_desc, "details": []})
+    if st.form_submit_button("Add Purpose") and p_title:
+        st.session_state.purposes.append({"title": p_title, "desc": p_desc, "details": {}})
 
 if st.session_state.purposes:
     st.subheader("Current Purposes")
     for i, p in enumerate(st.session_state.purposes):
-        st.write(f"**{i+1}. {p['title']}**")
+        c1, c2 = st.columns([6, 1])
+        c1.write(f"**{i+1}. {p['title']}**")
+        if c2.button("🗑️", key=f"del_purpose_{i}", help="Remove this purpose"):
+            st.session_state.purposes.pop(i)
+            st.rerun()
 
-# --- STEP 3: LOOP TOPICS ---
+# --- STEP 3: DETAIL PER PURPOSE ---
 if st.session_state.purposes:
     st.header("3. Detail Data Usage per Purpose")
     for i, p in enumerate(st.session_state.purposes):
         with st.expander(f"Details for: {p['title']}"):
-            # 1. Categories
-            selected_cats = st.multiselect(f"Select data categories for {p['title']}", 
-                               options=list(DATA_CATEGORIES.keys()), key=f"cat_{i}")
+            saved_details = p.get("details", {})
 
-            # Multiple additional categories
+            # Categories
+            default_cats = saved_details.get("categories", [])
+            selected_cats = st.multiselect(
+                f"Select data categories for {p['title']}",
+                options=list(DATA_CATEGORIES.keys()),
+                default=[c for c in default_cats if c in DATA_CATEGORIES],
+                key=f"cat_{i}"
+            )
+
+            # Extra custom categories
             if f"extra_cats_{i}" not in st.session_state:
-                st.session_state[f"extra_cats_{i}"] = []
+                st.session_state[f"extra_cats_{i}"] = saved_details.get("extra_cats", [])
 
             with st.form(key=f"extra_cat_form_{i}"):
-                new_extra = st.text_input("Add additional data category (optional)", 
+                new_extra = st.text_input("Add additional data category (optional)",
                                placeholder="e.g., Preferred language, nickname")
                 if st.form_submit_button("➕ Add") and new_extra.strip():
                     st.session_state[f"extra_cats_{i}"].append(new_extra.strip())
@@ -97,102 +287,124 @@ if st.session_state.purposes:
             if st.session_state[f"extra_cats_{i}"]:
                 st.write("**Added custom categories:**")
                 for j, item in enumerate(st.session_state[f"extra_cats_{i}"]):
-                    col1, col2 = st.columns([5, 1])
-                    col1.write(f"- {item}")
-                    if col2.button("✕", key=f"del_extra_{i}_{j}"):
+                    c1, c2 = st.columns([5, 1])
+                    c1.write(f"- {item}")
+                    if c2.button("✕", key=f"del_extra_{i}_{j}"):
                         st.session_state[f"extra_cats_{i}"].pop(j)
                         st.rerun()
 
             comment = ", ".join(st.session_state[f"extra_cats_{i}"])
 
-            # 2. Direct Collection
+            # Direct Collection
             st.markdown("---")
+            direct_options = ["Yes", "No"]
+            direct_default = saved_details.get("direct_collection", "Yes")
             direct_collection = st.radio(
                 "Is this information obtained directly from the data subject?",
-                ["Yes", "No"],
+                direct_options,
+                index=direct_options.index(direct_default),
                 key=f"direct_{i}"
             )
             indirect_source = ""
             if direct_collection == "No":
                 indirect_source = st.text_input(
                     "How is this information obtained? Please specify the source(s).",
-                    placeholder="e.g., Third-party data brokers, publicly available sources, employer records, credit reference agencies",
+                    value=saved_details.get("indirect_source", ""),
+                    placeholder="e.g., Third-party data brokers, publicly available sources, employer records",
                     key=f"indirect_src_{i}"
                 )
 
-            # 3. Third Parties
+            # Third Parties
             st.markdown("---")
-            sharing = st.radio("Is data shared with third parties?", ["No", "Yes"], key=f"share_{i}")
+            share_options = ["No", "Yes"]
+            share_default = "Yes" if saved_details.get("shared", "Internal use only") != "Internal use only" else "No"
+            sharing = st.radio(
+                "Is data shared with third parties?",
+                share_options,
+                index=share_options.index(share_default),
+                key=f"share_{i}"
+            )
             third_party = ""
             if sharing == "Yes":
-                third_party = st.text_input("Who is it shared with?", placeholder="""e.g., Hosting providers, analytics services or any external parties that collect or process the data at your request """, key=f"who_{i}")
-            
-            # 4. Retention
-            retention = st.text_input("Retention Period", placeholder="e.g., For as long as the account is active ", key=f"ret_{i}")
-            
-            # 5. Transfers
-            transfers = st.selectbox("International Transfers?", ["No", "Yes (Outside EU/UK)"], key=f"trans_{i}")
-            
-            # Save progress locally
+                third_party = st.text_input(
+                    "Who is it shared with?",
+                    value=saved_details.get("shared", "") if share_default == "Yes" else "",
+                    placeholder="e.g., Hosting providers, analytics services",
+                    key=f"who_{i}"
+                )
+
+            # Retention
+            retention = st.text_input(
+                "Retention Period",
+                value=saved_details.get("retention", ""),
+                placeholder="e.g., For as long as the account is active",
+                key=f"ret_{i}"
+            )
+
+            # Transfers
+            trans_options = ["No", "Yes (Outside EU/UK)"]
+            trans_default = saved_details.get("transfers", "No")
+            transfers = st.selectbox(
+                "International Transfers?",
+                trans_options,
+                index=trans_options.index(trans_default) if trans_default in trans_options else 0,
+                key=f"trans_{i}"
+            )
+
             p['details'] = {
                 "categories": selected_cats,
+                "extra_cats": st.session_state[f"extra_cats_{i}"],
                 "comment": comment,
                 "direct_collection": direct_collection,
-                "indirect_source": indirect_source if direct_collection == "No" else "",
+                "indirect_source": indirect_source,
                 "shared": third_party if sharing == "Yes" else "Internal use only",
                 "retention": retention,
                 "transfers": transfers
             }
 
 # --- STEP 4: GENERATE & DOWNLOAD ---
-if st.button("Generate Excel & Final Notice"):
-    
-    # --- Sheet 1: Purposes / Responses ---
+st.markdown("---")
+if st.button("📄 Generate Excel & Final Notice"):
     rows = []
     for p in st.session_state.purposes:
+        d = p.get('details', {})
         rows.append({
-            "Company": company_name,
-            "Subject Category": subject_cat,
+            "Company": st.session_state.get("company_name", ""),
+            "Subject Category": st.session_state.get("subject_cat", ""),
             "Purpose": p['title'],
             "Description": p['desc'],
-            "Data Categories": ", ".join(p['details']['categories']),
-            "Obtained Directly from Data Subject": p['details']['direct_collection'],
-            "Source if Not Direct": p['details']['indirect_source'],
-            "Sharing": p['details']['shared'],
-            "Retention": p['details']['retention'],
-            "Transfers": p['details']['transfers']
+            "Data Categories": ", ".join(d.get('categories', [])),
+            "Custom Categories": d.get('comment', ''),
+            "Obtained Directly from Data Subject": d.get('direct_collection', ''),
+            "Source if Not Direct": d.get('indirect_source', ''),
+            "Sharing": d.get('shared', ''),
+            "Retention": d.get('retention', ''),
+            "Transfers": d.get('transfers', '')
         })
 
     df_purposes = pd.DataFrame(rows)
-
-    # --- Sheet 2: Company Information ---
     df_company = pd.DataFrame([{
-        "Company Name": company_name,
-        "Data Subjects": subject_cat,
-        "Company Activities": activities
+        "Company Name": st.session_state.get("company_name", ""),
+        "Data Subjects": st.session_state.get("subject_cat", ""),
+        "Company Activities": st.session_state.get("activities", "")
     }])
 
-    # --- Create Excel file in memory ---
-    from io import BytesIO
     output = BytesIO()
-
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_purposes.to_excel(writer, index=False, sheet_name='Processing Details')
         df_company.to_excel(writer, index=False, sheet_name='Company Info')
-
     output.seek(0)
 
     st.download_button(
-        label="Download Excel File",
+        label="⬇️ Download Excel File",
         data=output,
-        file_name="gdpr_data.xlsx",
+        file_name=f"gdpr_{make_tab_name(company)}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # --- Display Notice in Browser (unchanged) ---
     st.markdown("---")
-    st.header(f"Data Protection Notice: {company_name}")
-    
+    st.header(f"Data Protection Notice: {st.session_state.get('company_name', '')}")
+
     st.subheader("Why do we process your personal data?")
     for p in st.session_state.purposes:
         with st.status(f"Click to see: {p['title']}"):
@@ -200,18 +412,19 @@ if st.button("Generate Excel & Final Notice"):
 
     st.subheader("Which personal data do we use?")
     for p in st.session_state.purposes:
-        for cat in p['details']['categories']:
+        d = p.get('details', {})
+        for cat in d.get('categories', []):
             with st.status(f"Category: {cat}"):
-                st.write(f"**Specifics:** {DATA_CATEGORIES[cat]}")
+                st.write(f"**Specifics:** {DATA_CATEGORIES.get(cat, '')}")
                 st.write(f"**Purpose:** {p['title']}")
-                st.write(f"**How long we keep it:** {p['details']['retention']}")
-                st.write(f"**Disclosed to:** {p['details']['shared']}")
-                if p['details']['direct_collection'] == "Yes":
+                st.write(f"**How long we keep it:** {d.get('retention', '')}")
+                st.write(f"**Disclosed to:** {d.get('shared', '')}")
+                if d.get('direct_collection') == "Yes":
                     st.write("**Source:** Obtained directly from you.")
                 else:
-                    source_text = p['details']['indirect_source'] if p['details']['indirect_source'] else "Not specified"
+                    source_text = d.get('indirect_source') or "Not specified"
                     st.write(f"**Source:** Not obtained directly from you — {source_text}")
-                if p['details']['transfers'] != "No":
+                if d.get('transfers', 'No') != "No":
                     st.warning("Note: This data is transferred outside the EU/UK.")
 
     st.subheader("What rights do you have over your data?")
@@ -223,11 +436,8 @@ if st.button("Generate Excel & Final Notice"):
     * **Right to Data Portability**: Transfer your data to another organization.
     """)
 
-    
-    # Reset button after generating notice
-    st.markdown("---")
-    if st.button("🔄 Start New Questionnaire", type="primary"):
-        # Clear all session state
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
+st.markdown("---")
+if st.button("🔄 Start New Questionnaire", type="secondary"):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
